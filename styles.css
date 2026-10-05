@@ -35,3 +35,43 @@
     border: 0;
     background: #fff;
 }
+
+/* Sayfa boş mu görünüyor yardımcı bandı */
+.mobile-link-browser-banner {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 12px;
+    background-color: var(--background-secondary);
+    border-top: 1px solid var(--background-modifier-border);
+    font-size: 13px;
+    color: var(--text-normal);
+}
+
+.mobile-link-banner-text {
+    color: var(--text-muted);
+}
+
+.mobile-link-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.mobile-link-banner-btn {
+    font-size: 12px;
+    padding: 3px 8px;
+    border-radius: var(--button-radius, 4px);
+    cursor: pointer;
+}
+
+.mobile-link-banner-close {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 2px 4px;
+    color: var(--text-muted);
+}

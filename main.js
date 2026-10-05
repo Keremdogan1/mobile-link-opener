@@ -151,6 +151,8 @@ class BrowserView extends ItemView {
         this.renderedUrl = null;
         this.hostEl = null;
         this.urlInput = null;
+        this.bannerEl = null;
+        this.bannerTimer = null;
     }
 
     getViewType() {
@@ -175,12 +177,84 @@ class BrowserView extends ItemView {
     }
 
     async setState(state, result) {
-        this.url = (state && state.url) || "";
-        this.render();
         try {
-            this.leaf.updateHeader();
-        } catch (e) {}
-        await super.setState(state, result);
+            this.url = (state && state.url) || "";
+            this.render();
+            try {
+                this.leaf.updateHeader();
+            } catch (e) {}
+            await super.setState(state, result);
+        } catch (err) {
+            console.error("[Mobile Link Opener] setState hatası:", err);
+        }
+    }
+
+    clearBannerTimer() {
+        if (this.bannerTimer) {
+            clearTimeout(this.bannerTimer);
+            this.bannerTimer = null;
+        }
+    }
+
+    hideBanner() {
+        this.clearBannerTimer();
+        if (this.bannerEl) {
+            this.bannerEl.remove();
+            this.bannerEl = null;
+        }
+    }
+
+    // İframe yüklendikten 6 saniye sonra görünen yardımcı bant
+    showBanner() {
+        if (!this.contentEl || !this.url || this.bannerEl) return;
+
+        let domain = "";
+        try {
+            domain = new URL(this.url).hostname;
+        } catch (e) {
+            domain = "";
+        }
+
+        const banner = this.contentEl.createDiv({ cls: "mobile-link-browser-banner" });
+        this.bannerEl = banner;
+
+        const textEl = banner.createDiv({ cls: "mobile-link-banner-text" });
+        textEl.setText("Sayfa boş mu görünüyor?");
+
+        const actionsEl = banner.createDiv({ cls: "mobile-link-banner-actions" });
+
+        // Düğme 1: Native'de aç
+        const openNativeBtn = actionsEl.createEl("button", {
+            cls: "mobile-link-banner-btn",
+            text: "Native'de aç"
+        });
+        openNativeBtn.addEventListener("click", () => {
+            this.plugin.openNative(this.url);
+        });
+
+        // Düğme 2: Bu siteyi hep native aç
+        const alwaysNativeBtn = actionsEl.createEl("button", {
+            cls: "mobile-link-banner-btn mod-cta",
+            text: "Bu siteyi hep native aç"
+        });
+        alwaysNativeBtn.addEventListener("click", async () => {
+            if (domain) {
+                await this.plugin.addAlwaysNativeDomain(domain);
+                new Notice(`${domain} her zaman native açılacak sitelere eklendi.`);
+            }
+            this.hideBanner();
+            this.plugin.openNative(this.url);
+        });
+
+        // Kapat düğmesi (X)
+        const closeBtn = actionsEl.createEl("button", {
+            cls: "mobile-link-banner-close clickable-icon",
+            attr: { "aria-label": "Kapat" }
+        });
+        setIcon(closeBtn, "x");
+        closeBtn.addEventListener("click", () => {
+            this.hideBanner();
+        });
     }
 
     async onOpen() {
@@ -195,19 +269,20 @@ class BrowserView extends ItemView {
         setIcon(reloadBtn, "refresh-cw");
         reloadBtn.addEventListener("click", () => {
             this.renderedUrl = null;
+            this.hideBanner();
             this.render();
         });
 
         const nativeBtn = bar.createEl("button", {
             cls: "clickable-icon",
-            attr: { "aria-label": "Native tarayicida ac" }
+            attr: { "aria-label": "Native tarayıcıda aç" }
         });
         setIcon(nativeBtn, "external-link");
         nativeBtn.addEventListener("click", () => {
             if (this.url) this.plugin.openNative(this.url);
         });
 
-        // Adres / arama cubugu
+        // Adres / arama çubuğu
         this.urlInput = bar.createEl("input", {
             cls: "mobile-link-browser-url",
             attr: {
@@ -234,14 +309,17 @@ class BrowserView extends ItemView {
     }
 
     render() {
-        if (!this.hostEl) return; // onOpen henuz calismadi, o cagiracak
+        if (!this.hostEl) return; // onOpen henüz çalışmadı, o çağıracak
 
         if (this.urlInput && document.activeElement !== this.urlInput) {
             this.urlInput.value = this.url || "";
         }
 
-        // Ayni url zaten yuklenmisse tekrar yukleme (siyah/beyaz ekran sorununu azaltir)
+        // Aynı URL zaten yüklendiyse tekrar yükleme
         if (!this.url || this.renderedUrl === this.url) return;
+
+        // Yeni sayfa yükleniyor, eski bandı ve zamanlayıcıyı temizle
+        this.hideBanner();
 
         this.hostEl.empty();
         this.hostEl.createEl("iframe", {
@@ -253,9 +331,16 @@ class BrowserView extends ItemView {
             }
         });
         this.renderedUrl = this.url;
+
+        // İframe yüklendikten 6 saniye sonra yardımcı bandı göster
+        this.clearBannerTimer();
+        this.bannerTimer = setTimeout(() => {
+            this.showBanner();
+        }, 6000);
     }
 
     async onClose() {
+        this.hideBanner();
         this.hostEl = null;
         this.urlInput = null;
         this.contentEl.empty();
@@ -400,6 +485,26 @@ module.exports = class MobileLinkOpener extends Plugin {
         } catch (e) {
             console.error("[Mobile Link Opener] Ayarlar kaydedilirken hata:", e);
             new Notice("Ayarlar kaydedilirken bir hata oluştu.");
+        }
+    }
+
+    // "Bu siteyi hep native aç" tıklandığında domaini ayarlara ekler ve kaydeder
+    async addAlwaysNativeDomain(domain) {
+        if (!domain) return;
+        try {
+            const cleanDomain = domain.trim().toLowerCase();
+            const currentList = (this.settings.alwaysNativeDomains || "")
+                .split("\n")
+                .map((s) => s.trim().toLowerCase())
+                .filter((s) => s.length > 0);
+
+            if (!currentList.includes(cleanDomain)) {
+                currentList.push(cleanDomain);
+                this.settings.alwaysNativeDomains = currentList.join("\n");
+                await this.saveSettings();
+            }
+        } catch (e) {
+            console.error("[Mobile Link Opener] Domain listeye eklenemedi:", e);
         }
     }
 
