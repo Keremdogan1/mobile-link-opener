@@ -8,7 +8,7 @@ const DEFAULT_SETTINGS = {
     customSearchUrl: "https://duckduckgo.com/?q={query}",
     alwaysNativeDomains: "google.com\nyoutube.com\nyoutu.be\nmega.nz",
     nativePresentationStyle: "fullscreen", // "fullscreen" veya "popover"
-    openLocation: "tab", // "tab" (Yeni sekme), "split" (Yan yana böl), "right" (Sağ kenar çubuğu)
+    openLocation: "split", // "split" (Önerilen - Yan yana böl), "tab" (Yeni sekme), "right" (Sağ kenar çubuğu)
     interceptLinks: true, // Linkleri yakalama açık/kapalı
     recentHistory: [] // Son açılan 50 site ({ url, time, title })
 };
@@ -532,16 +532,16 @@ class MobileLinkOpenerSettingTab extends PluginSettingTab {
                     });
             });
 
-        // 5) Web sekmesi açılış konumu (Sekme, Split, Sağ Kenar Çubuğu)
+        // 5) Web sekmesi açılış konumu (Split, Sekme, Sağ Kenar Çubuğu)
         new Setting(containerEl)
             .setName("Web sekmesi açılış konumu")
-            .setDesc("Gömülebilir web sayfalarının Obsidian içinde nerede açılacağını belirler.")
+            .setDesc("Gömülebilir web sayfalarının nerede açılacağını belirler. 'Split (Yan Yana Bölerek)' seçeneği notunuzun yanına ayrı bir bölme açar; ortadaki çizgiyi parmağınızla sola/sağa sürükleyerek genişliği serbestçe ayarlayabilirsiniz.")
             .addDropdown((dropdown) => {
                 dropdown
-                    .addOption("tab", "Yeni Sekme Olarak (Varsayılan)")
-                    .addOption("split", "Yan Yana Bölerek (Ekranın Yarısı - Split)")
-                    .addOption("right", "Sağ Kenar Çubuğunda (Right Sidebar)")
-                    .setValue(this.plugin.settings.openLocation || "tab")
+                    .addOption("split", "Yan Yana Bölerek (Önerilen - Parmağınızla Boyutlandırılabilir)")
+                    .addOption("tab", "Yeni Sekme Olarak (Tam Ekran Sekme)")
+                    .addOption("right", "Sağ Kenar Çubuğunda (Çekmece olarak notun üstünü kaplar)")
+                    .setValue(this.plugin.settings.openLocation || "split")
                     .onChange(async (value) => {
                         this.plugin.settings.openLocation = value;
                         await this.plugin.saveSettings();
@@ -619,8 +619,8 @@ module.exports = class MobileLinkOpener extends Plugin {
 
         this.registerView(VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
 
-        // Linke tıklamayı yakala (capture = true: Obsidian'dan önce biz görelim)
-        this.registerDomEvent(document, "click", (e) => this.handleLinkClick(e), true);
+        // Link yakalama sistemini kur (hem DOM Click hem window.open hook'u)
+        this.setupLinkInterception();
 
         this.addCommand({
             id: "open-recent-history",
@@ -750,43 +750,85 @@ module.exports = class MobileLinkOpener extends Plugin {
         }
     }
 
+    // Hem DOM click hem de window.open seviyesinde harici link yakalama
+    setupLinkInterception() {
+        // 1) DOM seviyesinde tıklamayı yakala (capture: true)
+        this.registerDomEvent(document, "click", (e) => this.handleLinkClick(e), true);
+
+        // 2) window.open Hook'u
+        // Obsidian mobilde (iPad/iPhone) Live Preview veya dahili bileşenler harici linklere dokunulduğunda
+        // doğrudan window.open() çağırarak Safari'yi açar. Bu hook ile Safari'ye gitmesini engelleyip
+        // eklenti içinden açılmasını sağlıyoruz.
+        const originalOpen = window.open;
+        this.originalWindowOpen = originalOpen;
+        const self = this;
+
+        window.open = function (url, target, features) {
+            // Eklenti link yakalama kapalıysa veya native sistem tarayıcısı açılmak isteniyorsa orijinal davranışı koru
+            if (!self.settings?.interceptLinks || self.bypassIntercept) {
+                return originalOpen.call(window, url, target, features);
+            }
+
+            // Gelen istek bir http/https web linki ise
+            if (typeof url === "string" && /^https?:\/\//i.test(url.trim())) {
+                // Safari'nin açılmasını durdur, Obsidian içinde aç
+                self.openUrl(url.trim());
+                return null;
+            }
+
+            return originalOpen.call(window, url, target, features);
+        };
+    }
+
     async handleLinkClick(event) {
         // Eğer kullanıcı ayarlarından link yakalama kapatılmışsa dokunma
         if (!this.settings?.interceptLinks) return;
 
-        // 1) Tıklanan anchor (A) öğesini tespit et (mobil/desktop uyumlu)
-        let anchor = null;
-        if (event.target && typeof event.target.closest === "function") {
-            anchor = event.target.closest("a");
-        }
-        if (!anchor && event.composedPath) {
-            anchor = event.composedPath().find((el) => el?.tagName === "A");
-        }
-        if (!anchor) return;
+        const target = event.target;
+        if (!target) return;
 
         // Kendi web tarayıcı arayüzümüz içindeki tıklamalara dokunma
-        if (anchor.closest(".mobile-link-browser")) return;
+        if (target.closest && target.closest(".mobile-link-browser")) return;
 
-        const href = anchor.getAttribute("href") || anchor.href;
+        let href = null;
+
+        // 1) Standart A etiketi kontrolü
+        const anchor = (target.closest ? target.closest("a") : null) ||
+                       (event.composedPath ? event.composedPath().find((el) => el?.tagName === "A") : null);
+        if (anchor) {
+            href = anchor.getAttribute("href") || anchor.href;
+        }
+
+        // 2) CodeMirror 6 Live Preview linkleri (.cm-link, .cm-url, .external-link, [data-href])
+        if (!href && target.closest) {
+            const cmEl = target.closest(".cm-link, .cm-url, .external-link, [data-href]");
+            if (cmEl) {
+                href = cmEl.getAttribute("data-href") || cmEl.getAttribute("href") || cmEl.textContent;
+            }
+        }
+
         if (!href) return;
 
         let url;
         try {
-            url = new URL(href, window.location.href);
+            url = new URL(href.trim(), window.location.href);
         } catch (e) {
-            return;
+            if (/^https?:\/\//i.test(href.trim())) {
+                url = { href: href.trim(), protocol: href.trim().split(":")[0] + ":" };
+            } else {
+                return;
+            }
         }
 
         if (url.protocol !== "http:" && url.protocol !== "https:") return;
 
         // Sadece Obsidian not görünümü içindeki linklerle ilgilen
-        // Mobilde okuma, canlı önizleme ve kaynak görünümlerinin tüm kapsayıcılarını kapsar
-        const isInsideNote = !!anchor.closest(
+        const isInsideNote = !!(target.closest && target.closest(
             ".markdown-preview-view, .markdown-source-view, .markdown-rendered, .markdown-reading-view, .cm-content, .cm-editor, .view-content, .workspace-leaf-content"
-        );
+        ));
         if (!isInsideNote) return;
 
-        // Bunlar async işlemden ÖNCE çağrılmalı
+        // Bunlar async işlemden ÖNCE çağrılmalı (Safari'nin açılmasını engeller)
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
@@ -876,22 +918,25 @@ module.exports = class MobileLinkOpener extends Plugin {
 
     async openInTab(url, preferredLocation) {
         try {
-            const loc = preferredLocation || this.settings?.openLocation || "tab";
+            const loc = preferredLocation || this.settings?.openLocation || "split";
             let leaf = null;
 
             if (loc === "right") {
-                // Sağ kenar çubuğunda aç (iPad'de sağ panel)
+                // Sağ kenar çubuğunda aç (iPad'de sağ panel çekmecesi)
                 leaf = this.app.workspace.getRightLeaf(false);
+                if (leaf && this.app.workspace.rightSplit) {
+                    this.app.workspace.rightSplit.expand();
+                }
             } else if (loc === "split") {
-                // Ekranı dikey olarak böl (ekranın yarısını kaplar)
+                // Ekranı dikey olarak böl (not sol tarafta kalır, web sağ tarafta açılır; parmakla boyutlandırılabilir)
                 leaf = this.app.workspace.getLeaf("split", "vertical");
             } else {
-                // Standart yeni sekme
+                // Standart yeni sekme (tam ekran sekme)
                 leaf = this.app.workspace.getLeaf("tab");
             }
 
             if (!leaf) {
-                leaf = this.app.workspace.getLeaf("tab");
+                leaf = this.app.workspace.getLeaf("split", "vertical") || this.app.workspace.getLeaf("tab");
             }
 
             await leaf.setViewState({
@@ -920,16 +965,23 @@ module.exports = class MobileLinkOpener extends Plugin {
             }
         }
 
-        // Masaüstü veya hata durumu: sistem tarayıcısı
+        // Masaüstü veya hata durumu: sistem tarayıcısı (Safari / Default)
         try {
+            this.bypassIntercept = true;
             window.open(url, "_blank");
         } catch (e) {
             console.error("[Mobile Link Opener] Sistem tarayıcısı açılamadı:", e);
             new Notice("Tarayıcı açılamadı.");
+        } finally {
+            this.bypassIntercept = false;
         }
     }
 
     onunload() {
+        if (this.originalWindowOpen) {
+            window.open = this.originalWindowOpen;
+            this.originalWindowOpen = null;
+        }
         this.app.workspace.detachLeavesOfType(VIEW_TYPE);
     }
 };
