@@ -94,4 +94,37 @@
     font-size: 11px;
     color: var(--text-muted);
 }
+
+/* Split (Yan Yana Bölme) ayraç çizgisi ve zarif parmak tutamacı */
+.workspace-split.mod-vertical > .workspace-leaf-resize-handle {
+    position: relative;
+    width: 14px !important;
+    margin-left: -6px;
+    margin-right: -6px;
+    z-index: 10;
+    cursor: col-resize;
+    touch-action: none;
+}
+
+.workspace-split.mod-vertical > .workspace-leaf-resize-handle::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 4px;
+    height: 38px;
+    border-radius: 4px;
+    background-color: var(--text-muted);
+    opacity: 0.55;
+    transition: opacity 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+}
+
+.workspace-split.mod-vertical > .workspace-leaf-resize-handle:hover::after,
+.workspace-split.mod-vertical > .workspace-leaf-resize-handle:active::after {
+    opacity: 1;
+    background-color: var(--interactive-accent);
+    transform: translate(-50%, -50%) scale(1.2, 1.1);
+}
+
 

@@ -7,8 +7,8 @@ const DEFAULT_SETTINGS = {
     searchEngine: "duckduckgo", // "duckduckgo", "bing", "brave", "custom"
     customSearchUrl: "https://duckduckgo.com/?q={query}",
     alwaysNativeDomains: "google.com\nyoutube.com\nyoutu.be\nmega.nz",
-    nativePresentationStyle: "fullscreen", // "fullscreen" veya "popover"
-    openLocation: "split", // "split" (Önerilen - Yan yana böl), "tab" (Yeni sekme), "right" (Sağ kenar çubuğu)
+    nativePresentationStyle: "fullscreen", // "fullscreen", "system", "popover"
+    openLocation: "tab", // "tab" (Yeni Sekme - Tam Ekran), "split" (Yan yana bölerek)
     interceptLinks: true, // Linkleri yakalama açık/kapalı
     recentHistory: [] // Son açılan 50 site ({ url, time, title })
 };
@@ -345,16 +345,6 @@ class BrowserView extends ItemView {
             if (this.url) this.plugin.openInTab(this.url, "split");
         });
 
-        // Sağ kenar çubuğunda açma butonu
-        const sidebarBtn = bar.createEl("button", {
-            cls: "clickable-icon",
-            attr: { "aria-label": "Sağ kenar çubuğunda aç" }
-        });
-        setIcon(sidebarBtn, "panel-right");
-        sidebarBtn.addEventListener("click", () => {
-            if (this.url) this.plugin.openInTab(this.url, "right");
-        });
-
         // Adres / arama çubuğu
         this.urlInput = bar.createEl("input", {
             cls: "mobile-link-browser-url",
@@ -517,31 +507,31 @@ class MobileLinkOpenerSettingTab extends PluginSettingTab {
                 textarea.inputEl.cols = 28;
             });
 
-        // 4) Native ekran stili (fullscreen veya popover)
+        // 4) Native ekran stili (fullscreen, system, popover)
         new Setting(containerEl)
             .setName("Native ekran stili")
-            .setDesc("Capacitor Browser ile native açıldığında ekranın sunum biçimi.")
+            .setDesc("Gömülemeyen siteler native açıldığında ekran görünümü. 'Tam Ekran Dahili Tarayıcı' ekranın ortasında sıkışmadan tam ekran açılır. 'Sistem Safari Uygulaması' ise iPadOS Slide-Over veya Split-View ile serbestçe taşınabilir ve boyutlandırılabilir.")
             .addDropdown((dropdown) => {
                 dropdown
-                    .addOption("fullscreen", "Tam Ekran (Fullscreen)")
-                    .addOption("popover", "Açılır Pencere (Popover)")
-                    .setValue(this.plugin.settings.nativePresentationStyle)
+                    .addOption("fullscreen", "Tam Ekran Dahili Tarayıcı (Önerilen)")
+                    .addOption("system", "Sistem Safari Uygulaması (iPad Slide-Over / Split-View için)")
+                    .addOption("popover", "Açılır Pencere (Popover - Ortada sabit)")
+                    .setValue(this.plugin.settings.nativePresentationStyle || "fullscreen")
                     .onChange(async (value) => {
                         this.plugin.settings.nativePresentationStyle = value;
                         await this.plugin.saveSettings();
                     });
             });
 
-        // 5) Web sekmesi açılış konumu (Split, Sekme, Sağ Kenar Çubuğu)
+        // 5) Web sekmesi açılış konumu (Sekme, Split)
         new Setting(containerEl)
             .setName("Web sekmesi açılış konumu")
-            .setDesc("Gömülebilir web sayfalarının nerede açılacağını belirler. 'Split (Yan Yana Bölerek)' seçeneği notunuzun yanına ayrı bir bölme açar; ortadaki çizgiyi parmağınızla sola/sağa sürükleyerek genişliği serbestçe ayarlayabilirsiniz.")
+            .setDesc("Gömülebilir web sayfalarının Obsidian içinde nerede açılacağını belirler. Yeni sekme açıldıktan sonra üst çubuktaki 'Split' simgesiyle de istediğiniz an ekranı ikiye bölebilirsiniz.")
             .addDropdown((dropdown) => {
                 dropdown
-                    .addOption("split", "Yan Yana Bölerek (Önerilen - Parmağınızla Boyutlandırılabilir)")
-                    .addOption("tab", "Yeni Sekme Olarak (Tam Ekran Sekme)")
-                    .addOption("right", "Sağ Kenar Çubuğunda (Çekmece olarak notun üstünü kaplar)")
-                    .setValue(this.plugin.settings.openLocation || "split")
+                    .addOption("tab", "Yeni Sekme Olarak (Varsayılan - Tam Ekran)")
+                    .addOption("split", "Yan Yana Bölerek (Split View - Parmağınızla Boyutlandırılabilir)")
+                    .setValue(this.plugin.settings.openLocation || "tab")
                     .onChange(async (value) => {
                         this.plugin.settings.openLocation = value;
                         await this.plugin.saveSettings();
@@ -640,12 +630,6 @@ module.exports = class MobileLinkOpener extends Plugin {
             id: "new-web-split",
             name: "Yeni web sekmesi aç (Yan yana bölerek - Split)",
             callback: () => this.openInTab("", "split")
-        });
-
-        this.addCommand({
-            id: "new-web-right",
-            name: "Yeni web sekmesi aç (Sağ kenar çubuğunda)",
-            callback: () => this.openInTab("", "right")
         });
 
         this.addCommand({
@@ -790,21 +774,20 @@ module.exports = class MobileLinkOpener extends Plugin {
         // Kendi web tarayıcı arayüzümüz içindeki tıklamalara dokunma
         if (target.closest && target.closest(".mobile-link-browser")) return;
 
-        let href = null;
+        // Editör veya Canlı Önizleme (Live Preview) içinde link metnini DÜZENLERKEN
+        // araya girme, kullanıcı rahatça imleç koyabilsin ve düzenleyebilsin.
+        // Kullanıcı linki açmayı amaçladığında Obsidian kendisi window.open() çağırır ve
+        // bizim window.open kancamız Safari'ye gitmeden yakalar.
+        if (target.closest && target.closest(".cm-content, .cm-editor")) {
+            return;
+        }
 
-        // 1) Standart A etiketi kontrolü
+        // Okuma görünümünde (Reading view) A etiketi tıklandığında:
+        let href = null;
         const anchor = (target.closest ? target.closest("a") : null) ||
                        (event.composedPath ? event.composedPath().find((el) => el?.tagName === "A") : null);
         if (anchor) {
             href = anchor.getAttribute("href") || anchor.href;
-        }
-
-        // 2) CodeMirror 6 Live Preview linkleri (.cm-link, .cm-url, .external-link, [data-href])
-        if (!href && target.closest) {
-            const cmEl = target.closest(".cm-link, .cm-url, .external-link, [data-href]");
-            if (cmEl) {
-                href = cmEl.getAttribute("data-href") || cmEl.getAttribute("href") || cmEl.textContent;
-            }
         }
 
         if (!href) return;
@@ -824,7 +807,7 @@ module.exports = class MobileLinkOpener extends Plugin {
 
         // Sadece Obsidian not görünümü içindeki linklerle ilgilen
         const isInsideNote = !!(target.closest && target.closest(
-            ".markdown-preview-view, .markdown-source-view, .markdown-rendered, .markdown-reading-view, .cm-content, .cm-editor, .view-content, .workspace-leaf-content"
+            ".markdown-preview-view, .markdown-rendered, .markdown-reading-view, .view-content, .workspace-leaf-content"
         ));
         if (!isInsideNote) return;
 
@@ -918,25 +901,19 @@ module.exports = class MobileLinkOpener extends Plugin {
 
     async openInTab(url, preferredLocation) {
         try {
-            const loc = preferredLocation || this.settings?.openLocation || "split";
+            const loc = preferredLocation || this.settings?.openLocation || "tab";
             let leaf = null;
 
-            if (loc === "right") {
-                // Sağ kenar çubuğunda aç (iPad'de sağ panel çekmecesi)
-                leaf = this.app.workspace.getRightLeaf(false);
-                if (leaf && this.app.workspace.rightSplit) {
-                    this.app.workspace.rightSplit.expand();
-                }
-            } else if (loc === "split") {
+            if (loc === "split") {
                 // Ekranı dikey olarak böl (not sol tarafta kalır, web sağ tarafta açılır; parmakla boyutlandırılabilir)
                 leaf = this.app.workspace.getLeaf("split", "vertical");
             } else {
-                // Standart yeni sekme (tam ekran sekme)
+                // Standart yeni sekme (tam ekran sekme - varsayılan)
                 leaf = this.app.workspace.getLeaf("tab");
             }
 
             if (!leaf) {
-                leaf = this.app.workspace.getLeaf("split", "vertical") || this.app.workspace.getLeaf("tab");
+                leaf = this.app.workspace.getLeaf("tab");
             }
 
             await leaf.setViewState({
@@ -952,11 +929,28 @@ module.exports = class MobileLinkOpener extends Plugin {
     }
 
     async openNative(url) {
+        const style = this.settings?.nativePresentationStyle || "fullscreen";
+
+        // 1) Eğer kullanıcı sistem Safari uygulamasını seçtiyse doğrudan Safari'de aç (iPad Slide-Over / Split-View için serbestçe taşınabilir)
+        if (style === "system") {
+            try {
+                this.bypassIntercept = true;
+                window.open(url, "_blank");
+                return;
+            } catch (e) {
+                console.error("[Mobile Link Opener] Sistem tarayıcısı açılamadı:", e);
+                new Notice("Tarayıcı açılamadı.");
+                return;
+            } finally {
+                this.bypassIntercept = false;
+            }
+        }
+
         const browser = window.Capacitor?.Plugins?.Browser;
 
         if (browser && isNativePlatform()) {
             try {
-                const presentationStyle = this.settings?.nativePresentationStyle || "fullscreen";
+                const presentationStyle = style === "popover" ? "popover" : "fullscreen";
                 await browser.open({ url, presentationStyle });
                 return;
             } catch (e) {
@@ -965,7 +959,7 @@ module.exports = class MobileLinkOpener extends Plugin {
             }
         }
 
-        // Masaüstü veya hata durumu: sistem tarayıcısı (Safari / Default)
+        // Masaüstü veya hata durumu: sistem tarayıcısı
         try {
             this.bypassIntercept = true;
             window.open(url, "_blank");
