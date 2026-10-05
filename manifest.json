@@ -1,7 +1,7 @@
 {
   "id": "mobile-link-opener",
   "name": "Mobile Link Opener",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "minAppVersion": "1.5.0",
   "description": "Opens web links in an Obsidian tab when the site allows it, otherwise in the native in-app browser.",
   "author": "Keremdogan1",
