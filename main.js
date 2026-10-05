@@ -1,4 +1,4 @@
-const { Plugin, ItemView, Notice, requestUrl, setIcon, Setting, PluginSettingTab, SuggestModal } = require("obsidian");
+const { Plugin, ItemView, Notice, requestUrl, setIcon, Setting, PluginSettingTab, SuggestModal, Platform } = require("obsidian");
 
 const VIEW_TYPE = "mobile-link-browser";
 
@@ -61,9 +61,16 @@ function isAlwaysNativeHost(hostname, settings) {
     return hostMatches(hostname.toLowerCase(), list);
 }
 
+// Platformun mobil (iOS iPad/iPhone veya Android tablet/telefon) olup olmadığını kontrol eder
 function isNativePlatform() {
+    if (Platform && Platform.isMobile) return true;
     const cap = window.Capacitor;
     return !!(cap && typeof cap.isNativePlatform === "function" && cap.isNativePlatform());
+}
+
+// Cihazın küçük ekranlı bir telefon (iPhone veya Android telefon) olup olmadığını kontrol eder
+function isPhoneDevice() {
+    return !!(Platform && Platform.isPhone);
 }
 
 // Origin bazında gömülebilirlik önbelleği (origin -> { canEmbed: boolean, expiresAt: number })
@@ -901,14 +908,19 @@ module.exports = class MobileLinkOpener extends Plugin {
 
     async openInTab(url, preferredLocation) {
         try {
-            const loc = preferredLocation || this.settings?.openLocation || "tab";
-            let leaf = null;
+            let loc = preferredLocation || this.settings?.openLocation || "tab";
 
-            if (loc === "split") {
-                // Ekranı dikey olarak böl (not sol tarafta kalır, web sağ tarafta açılır; parmakla boyutlandırılabilir)
+            // Telefonlarda (iPhone / Android telefon) dikey bölme ekranı çok sıkıştıracağı için tam ekran sekme aç
+            if (isPhoneDevice() && !preferredLocation) {
+                loc = "tab";
+            }
+
+            let leaf = null;
+            if (loc === "split" && !isPhoneDevice()) {
+                // Ekranı dikey olarak böl (iPad / Tabletlerde; parmakla boyutlandırılabilir)
                 leaf = this.app.workspace.getLeaf("split", "vertical");
             } else {
-                // Standart yeni sekme (tam ekran sekme - varsayılan)
+                // Standart yeni sekme (tam ekran sekme - varsayılan ve telefonlar)
                 leaf = this.app.workspace.getLeaf("tab");
             }
 
