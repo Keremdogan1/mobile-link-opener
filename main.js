@@ -6,7 +6,7 @@ const VIEW_TYPE = "mobile-link-browser";
 const DEFAULT_SETTINGS = {
     searchEngine: "duckduckgo", // "duckduckgo", "bing", "brave", "custom"
     customSearchUrl: "https://duckduckgo.com/?q={query}",
-    alwaysNativeDomains: "google.com\nyoutube.com\nyoutu.be\nmega.nz",
+    alwaysNativeDomains: "google.com\nyoutube.com\nyoutu.be\nmega.nz\nmetu.edu.tr\npearson.com",
     nativePresentationStyle: "fullscreen", // "fullscreen", "system", "popover"
     openLocation: "tab", // "tab" (Yeni Sekme - Tam Ekran), "split" (Yan yana bölerek)
     interceptLinks: true, // Linkleri yakalama açık/kapalı
@@ -504,7 +504,7 @@ class MobileLinkOpenerSettingTab extends PluginSettingTab {
             .setDesc("Bu siteler iframe yerine doğrudan iOS native tarayıcısında açılır. Her satıra bir alan adı yazın (Ör: google.com).")
             .addTextArea((textarea) => {
                 textarea
-                    .setPlaceholder("google.com\nyoutube.com\nyoutu.be\nmega.nz")
+                    .setPlaceholder("google.com\nyoutube.com\nyoutu.be\nmega.nz\nmetu.edu.tr\npearson.com")
                     .setValue(this.plugin.settings.alwaysNativeDomains)
                     .onChange(async (value) => {
                         this.plugin.settings.alwaysNativeDomains = value;
@@ -638,23 +638,29 @@ module.exports = class MobileLinkOpener extends Plugin {
             name: "Yeni web sekmesi aç (Yan yana bölerek - Split)",
             callback: () => this.openInTab("", "split")
         });
-
-        this.addCommand({
-            id: "test-native-browser",
-            name: "Test: native tarayıcı (Google)",
-            callback: () => this.openNative("https://www.google.com")
-        });
-
-        this.addCommand({
-            id: "test-tab-browser",
-            name: "Test: Obsidian sekmesinde aç (example.com)",
-            callback: () => this.openInTab("https://example.com")
-        });
     }
 
     async loadSettings() {
         try {
-            this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+            const loaded = await this.loadData();
+            this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+
+            // Daha önceden kaydedilmiş ayarlara metu.edu.tr ve pearson.com'u bir kerelik otomatik ekle
+            if (!this.settings.migratedMetuPearson) {
+                const list = (this.settings.alwaysNativeDomains || "")
+                    .split("\n")
+                    .map((s) => s.trim().toLowerCase())
+                    .filter((s) => s.length > 0);
+
+                for (const dom of ["metu.edu.tr", "pearson.com"]) {
+                    if (!list.includes(dom)) {
+                        list.push(dom);
+                    }
+                }
+                this.settings.alwaysNativeDomains = list.join("\n");
+                this.settings.migratedMetuPearson = true;
+                await this.saveSettings();
+            }
         } catch (e) {
             console.error("[Mobile Link Opener] Ayarlar yüklenirken hata:", e);
             this.settings = Object.assign({}, DEFAULT_SETTINGS);
