@@ -74,4 +74,24 @@
     cursor: pointer;
     padding: 2px 4px;
     color: var(--text-muted);
-}
+}
+
+/* Son açılan siteler (SuggestModal) stilleri */
+.mobile-link-history-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.mobile-link-history-title {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mobile-link-history-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+

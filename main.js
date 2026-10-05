@@ -1,4 +1,4 @@
-const { Plugin, ItemView, Notice, requestUrl, setIcon, Setting, PluginSettingTab } = require("obsidian");
+const { Plugin, ItemView, Notice, requestUrl, setIcon, Setting, PluginSettingTab, SuggestModal } = require("obsidian");
 
 const VIEW_TYPE = "mobile-link-browser";
 
@@ -8,7 +8,8 @@ const DEFAULT_SETTINGS = {
     customSearchUrl: "https://duckduckgo.com/?q={query}",
     alwaysNativeDomains: "google.com\nyoutube.com\nyoutu.be\nmega.nz",
     nativePresentationStyle: "fullscreen", // "fullscreen" veya "popover"
-    interceptLinks: true // Linkleri yakalama açık/kapalı
+    interceptLinks: true, // Linkleri yakalama açık/kapalı
+    recentHistory: [] // Son açılan 50 site ({ url, time, title })
 };
 
 // Arama URL'si oluşturur (Google gömülemediği için seçenekler arasında yer almaz)
@@ -440,6 +441,67 @@ class MobileLinkOpenerSettingTab extends PluginSettingTab {
     }
 }
 
+// Geçmiş için göreli veya okunabilir tarih/zaman formatı
+function formatTimeAgo(timestamp) {
+    if (!timestamp) return "";
+    const diff = Date.now() - timestamp;
+    const minutes = Math.floor(diff / (60 * 1000));
+    const hours = Math.floor(diff / (60 * 60 * 1000));
+    const days = Math.floor(diff / (24 * 60 * 60 * 1000));
+
+    if (minutes < 1) return "Az önce";
+    if (minutes < 60) return `${minutes} dk önce`;
+    if (hours < 24) return `${hours} saat önce`;
+    if (days < 7) return `${days} gün önce`;
+
+    const d = new Date(timestamp);
+    return `${d.toLocaleDateString("tr-TR")} ${d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+// Son açılan siteler arama ve seçim modalı (SuggestModal)
+class RecentHistoryModal extends SuggestModal {
+    constructor(app, plugin) {
+        super(app);
+        this.plugin = plugin;
+        this.setPlaceholder("Son açılan sitelerde ara...");
+    }
+
+    getSuggestions(query) {
+        const history = this.plugin.settings.recentHistory || [];
+        const q = (query || "").trim().toLowerCase();
+        if (!q) return history;
+        return history.filter((item) => {
+            const matchUrl = item.url && item.url.toLowerCase().includes(q);
+            const matchTitle = item.title && item.title.toLowerCase().includes(q);
+            return matchUrl || matchTitle;
+        });
+    }
+
+    renderSuggestion(item, el) {
+        el.addClass("mobile-link-history-item");
+        const titleEl = el.createDiv({ cls: "mobile-link-history-title" });
+        titleEl.setText(item.title || item.url);
+
+        const metaEl = el.createDiv({ cls: "mobile-link-history-meta" });
+        let host = "";
+        try {
+            host = new URL(item.url).hostname;
+        } catch (e) {
+            host = item.url;
+        }
+        metaEl.createSpan({ cls: "mobile-link-history-host", text: host });
+        if (item.time) {
+            metaEl.createSpan({ cls: "mobile-link-history-time", text: " • " + formatTimeAgo(item.time) });
+        }
+    }
+
+    async onChooseSuggestion(item, evt) {
+        if (item && item.url) {
+            await this.plugin.openUrl(item.url);
+        }
+    }
+}
+
 module.exports = class MobileLinkOpener extends Plugin {
     async onload() {
         // Ayarları yükle
@@ -450,6 +512,14 @@ module.exports = class MobileLinkOpener extends Plugin {
 
         // Linke tıklamayı yakala (capture = true: Obsidian'dan önce biz görelim)
         this.registerDomEvent(document, "click", (e) => this.handleLinkClick(e), true);
+
+        this.addCommand({
+            id: "open-recent-history",
+            name: "Son açılan siteler",
+            callback: () => {
+                new RecentHistoryModal(this.app, this).open();
+            }
+        });
 
         this.addCommand({
             id: "new-web-tab",
@@ -508,6 +578,38 @@ module.exports = class MobileLinkOpener extends Plugin {
         }
     }
 
+    // Açılan URL'yi son 50 geçmiş kaydına ekler (tekrarları birleştirir)
+    async addToHistory(url, title = "") {
+        if (!url || typeof url !== "string") return;
+        try {
+            if (!this.settings.recentHistory) {
+                this.settings.recentHistory = [];
+            }
+
+            const cleanUrl = url.trim();
+            // Tekrarları birleştir: aynı URL varsa listeden çıkar
+            this.settings.recentHistory = this.settings.recentHistory.filter(
+                (item) => item && item.url !== cleanUrl
+            );
+
+            // En başa yeni tarihle ekle
+            this.settings.recentHistory.unshift({
+                url: cleanUrl,
+                time: Date.now(),
+                title: title || ""
+            });
+
+            // En fazla 50 kayıt sakla
+            if (this.settings.recentHistory.length > 50) {
+                this.settings.recentHistory = this.settings.recentHistory.slice(0, 50);
+            }
+
+            await this.saveSettings();
+        } catch (e) {
+            console.error("[Mobile Link Opener] Geçmişe eklenirken hata:", e);
+        }
+    }
+
     async handleLinkClick(event) {
         // Eğer kullanıcı ayarlarından link yakalama kapatılmışsa dokunma
         if (!this.settings?.interceptLinks) return;
@@ -545,6 +647,10 @@ module.exports = class MobileLinkOpener extends Plugin {
 
     async openUrl(url) {
         try {
+            if (!url) return;
+            // Açılan URL'yi son gezilen siteler geçmişine ekle
+            await this.addToHistory(url);
+
             const hostname = new URL(url).hostname.toLowerCase();
 
             // 1) Bilinen / kullanıcı tarafından belirlenen siteler: direkt native (sadece telefonda/iPad'de)
@@ -578,6 +684,9 @@ module.exports = class MobileLinkOpener extends Plugin {
         try {
             const url = normalizeInput(text, this.settings);
             if (!url) return;
+
+            // Adres çubuğundan gidilen adresi geçmişe ekle
+            await this.addToHistory(url);
 
             const hostname = new URL(url).hostname.toLowerCase();
             const forceNative = isNativePlatform() && isAlwaysNativeHost(hostname, this.settings);
