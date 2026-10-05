@@ -144,11 +144,60 @@ async function canEmbed(url) {
     return result;
 }
 
+// URL bazında sayfa başlıkları önbelleği (url -> title)
+const titleCache = new Map();
+
+// Basit HTML entity çözümleyici
+function decodeHtmlEntities(str) {
+    if (!str) return "";
+    return str
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(code))
+        .trim();
+}
+
+// Sayfa başlığını arka planda çeker (HTML'in ilk ~50 KB'ında regex ile arar)
+async function fetchPageTitle(url) {
+    if (!url) return null;
+
+    // Önbellekte varsa doğrudan dön
+    if (titleCache.has(url)) {
+        return titleCache.get(url);
+    }
+
+    try {
+        // 5 saniye zaman aşımı ile GET isteği at
+        const res = await withTimeout(requestUrl({ url, method: "GET", throw: false }), 5000);
+        if (res.status >= 200 && res.status < 400 && res.text) {
+            // İlk 50 KB'lık kısmı tara
+            const chunk = res.text.slice(0, 50000);
+            const match = chunk.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+            if (match && match[1]) {
+                const title = decodeHtmlEntities(match[1]).replace(/\s+/g, " ");
+                if (title) {
+                    titleCache.set(url, title);
+                    return title;
+                }
+            }
+        }
+    } catch (e) {
+        // Hata durumunda sessizce geçilir, sekmede hostname gösterilmeye devam eder
+    }
+
+    return null;
+}
+
 class BrowserView extends ItemView {
     constructor(leaf, plugin) {
         super(leaf);
         this.plugin = plugin;
         this.url = "";
+        this.pageTitle = "";
         this.renderedUrl = null;
         this.hostEl = null;
         this.urlInput = null;
@@ -165,6 +214,7 @@ class BrowserView extends ItemView {
     }
 
     getDisplayText() {
+        if (this.pageTitle) return this.pageTitle;
         try {
             return this.url ? new URL(this.url).hostname : "Web";
         } catch (e) {
@@ -270,6 +320,7 @@ class BrowserView extends ItemView {
         setIcon(reloadBtn, "refresh-cw");
         reloadBtn.addEventListener("click", () => {
             this.renderedUrl = null;
+            this.pageTitle = "";
             this.hideBanner();
             this.render();
         });
@@ -309,6 +360,23 @@ class BrowserView extends ItemView {
         this.render();
     }
 
+    // Sayfa başlığını arka planda çeker ve sekme başlığını günceller
+    async loadTitle(url) {
+        if (!url) return;
+        try {
+            const title = await fetchPageTitle(url);
+            if (title && this.url === url) {
+                this.pageTitle = title;
+                try {
+                    this.leaf.updateHeader();
+                } catch (e) {}
+                await this.plugin.updateHistoryTitle(url, title);
+            }
+        } catch (e) {
+            // Hata olursa sessizce hostname'e dön
+        }
+    }
+
     render() {
         if (!this.hostEl) return; // onOpen henüz çalışmadı, o çağıracak
 
@@ -332,6 +400,10 @@ class BrowserView extends ItemView {
             }
         });
         this.renderedUrl = this.url;
+
+        // Sayfa başlığını arka planda yükle
+        this.pageTitle = titleCache.get(this.url) || "";
+        this.loadTitle(this.url);
 
         // İframe yüklendikten 6 saniye sonra yardımcı bandı göster
         this.clearBannerTimer();
@@ -607,6 +679,25 @@ module.exports = class MobileLinkOpener extends Plugin {
             await this.saveSettings();
         } catch (e) {
             console.error("[Mobile Link Opener] Geçmişe eklenirken hata:", e);
+        }
+    }
+
+    // Geçmişteki URL kaydının başlığını günceller
+    async updateHistoryTitle(url, title) {
+        if (!url || !title || !this.settings?.recentHistory) return;
+        try {
+            let updated = false;
+            for (const item of this.settings.recentHistory) {
+                if (item && item.url === url && !item.title) {
+                    item.title = title;
+                    updated = true;
+                }
+            }
+            if (updated) {
+                await this.saveSettings();
+            }
+        } catch (e) {
+            console.error("[Mobile Link Opener] Geçmiş başlığı güncellenirken hata:", e);
         }
     }
 
