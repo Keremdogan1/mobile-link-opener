@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
     customSearchUrl: "https://duckduckgo.com/?q={query}",
     alwaysNativeDomains: "google.com\nyoutube.com\nyoutu.be\nmega.nz",
     nativePresentationStyle: "fullscreen", // "fullscreen" veya "popover"
+    openLocation: "tab", // "tab" (Yeni sekme), "split" (Yan yana böl), "right" (Sağ kenar çubuğu)
     interceptLinks: true, // Linkleri yakalama açık/kapalı
     recentHistory: [] // Son açılan 50 site ({ url, time, title })
 };
@@ -334,6 +335,26 @@ class BrowserView extends ItemView {
             if (this.url) this.plugin.openNative(this.url);
         });
 
+        // Ekranı ikiye bölerek (Split) açma butonu
+        const splitBtn = bar.createEl("button", {
+            cls: "clickable-icon",
+            attr: { "aria-label": "Yan yana bölerek aç (Split)" }
+        });
+        setIcon(splitBtn, "columns");
+        splitBtn.addEventListener("click", () => {
+            if (this.url) this.plugin.openInTab(this.url, "split");
+        });
+
+        // Sağ kenar çubuğunda açma butonu
+        const sidebarBtn = bar.createEl("button", {
+            cls: "clickable-icon",
+            attr: { "aria-label": "Sağ kenar çubuğunda aç" }
+        });
+        setIcon(sidebarBtn, "panel-right");
+        sidebarBtn.addEventListener("click", () => {
+            if (this.url) this.plugin.openInTab(this.url, "right");
+        });
+
         // Adres / arama çubuğu
         this.urlInput = bar.createEl("input", {
             cls: "mobile-link-browser-url",
@@ -510,6 +531,22 @@ class MobileLinkOpenerSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     });
             });
+
+        // 5) Web sekmesi açılış konumu (Sekme, Split, Sağ Kenar Çubuğu)
+        new Setting(containerEl)
+            .setName("Web sekmesi açılış konumu")
+            .setDesc("Gömülebilir web sayfalarının Obsidian içinde nerede açılacağını belirler.")
+            .addDropdown((dropdown) => {
+                dropdown
+                    .addOption("tab", "Yeni Sekme Olarak (Varsayılan)")
+                    .addOption("split", "Yan Yana Bölerek (Ekranın Yarısı - Split)")
+                    .addOption("right", "Sağ Kenar Çubuğunda (Right Sidebar)")
+                    .setValue(this.plugin.settings.openLocation || "tab")
+                    .onChange(async (value) => {
+                        this.plugin.settings.openLocation = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
     }
 }
 
@@ -596,7 +633,19 @@ module.exports = class MobileLinkOpener extends Plugin {
         this.addCommand({
             id: "new-web-tab",
             name: "Yeni web sekmesi aç",
-            callback: () => this.openInTab("")
+            callback: () => this.openInTab("", "tab")
+        });
+
+        this.addCommand({
+            id: "new-web-split",
+            name: "Yeni web sekmesi aç (Yan yana bölerek - Split)",
+            callback: () => this.openInTab("", "split")
+        });
+
+        this.addCommand({
+            id: "new-web-right",
+            name: "Yeni web sekmesi aç (Sağ kenar çubuğunda)",
+            callback: () => this.openInTab("", "right")
         });
 
         this.addCommand({
@@ -705,10 +754,20 @@ module.exports = class MobileLinkOpener extends Plugin {
         // Eğer kullanıcı ayarlarından link yakalama kapatılmışsa dokunma
         if (!this.settings?.interceptLinks) return;
 
-        const anchor = event.composedPath?.().find((el) => el?.tagName === "A");
+        // 1) Tıklanan anchor (A) öğesini tespit et (mobil/desktop uyumlu)
+        let anchor = null;
+        if (event.target && typeof event.target.closest === "function") {
+            anchor = event.target.closest("a");
+        }
+        if (!anchor && event.composedPath) {
+            anchor = event.composedPath().find((el) => el?.tagName === "A");
+        }
         if (!anchor) return;
 
-        const href = anchor.getAttribute("href");
+        // Kendi web tarayıcı arayüzümüz içindeki tıklamalara dokunma
+        if (anchor.closest(".mobile-link-browser")) return;
+
+        const href = anchor.getAttribute("href") || anchor.href;
         if (!href) return;
 
         let url;
@@ -720,8 +779,12 @@ module.exports = class MobileLinkOpener extends Plugin {
 
         if (url.protocol !== "http:" && url.protocol !== "https:") return;
 
-        // Sadece not içindeki (okuma / düzenleme görünümü) linklerle ilgilen
-        if (!anchor.closest(".markdown-preview-view, .markdown-source-view")) return;
+        // Sadece Obsidian not görünümü içindeki linklerle ilgilen
+        // Mobilde okuma, canlı önizleme ve kaynak görünümlerinin tüm kapsayıcılarını kapsar
+        const isInsideNote = !!anchor.closest(
+            ".markdown-preview-view, .markdown-source-view, .markdown-rendered, .markdown-reading-view, .cm-content, .cm-editor, .view-content, .workspace-leaf-content"
+        );
+        if (!isInsideNote) return;
 
         // Bunlar async işlemden ÖNCE çağrılmalı
         event.preventDefault();
@@ -793,6 +856,10 @@ module.exports = class MobileLinkOpener extends Plugin {
 
             if (forceNative || !embeddable) {
                 new Notice("Bu site Obsidian sekmesinde gösterilemiyor, native tarayıcıda açılıyor.");
+                // BUG FIX: Sekmede açık olan gerçek URL'ye geri döndür
+                if (view.urlInput) {
+                    view.urlInput.value = view.url || "";
+                }
                 return await this.openNative(url);
             }
 
@@ -807,9 +874,26 @@ module.exports = class MobileLinkOpener extends Plugin {
         }
     }
 
-    async openInTab(url) {
+    async openInTab(url, preferredLocation) {
         try {
-            const leaf = this.app.workspace.getLeaf("tab");
+            const loc = preferredLocation || this.settings?.openLocation || "tab";
+            let leaf = null;
+
+            if (loc === "right") {
+                // Sağ kenar çubuğunda aç (iPad'de sağ panel)
+                leaf = this.app.workspace.getRightLeaf(false);
+            } else if (loc === "split") {
+                // Ekranı dikey olarak böl (ekranın yarısını kaplar)
+                leaf = this.app.workspace.getLeaf("split", "vertical");
+            } else {
+                // Standart yeni sekme
+                leaf = this.app.workspace.getLeaf("tab");
+            }
+
+            if (!leaf) {
+                leaf = this.app.workspace.getLeaf("tab");
+            }
+
             await leaf.setViewState({
                 type: VIEW_TYPE,
                 active: true,
