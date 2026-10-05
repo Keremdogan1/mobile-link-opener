@@ -1,27 +1,62 @@
-const { Plugin, ItemView, Notice, requestUrl, setIcon } = require("obsidian");
+const { Plugin, ItemView, Notice, requestUrl, setIcon, Setting, PluginSettingTab } = require("obsidian");
 
 const VIEW_TYPE = "mobile-link-browser";
 
-// Native ekran (Capacitor Browser) nasıl açılsın: "fullscreen" veya "popover"
-const NATIVE_PRESENTATION_STYLE = "fullscreen";
+// Varsayılan eklenti ayarları
+const DEFAULT_SETTINGS = {
+    searchEngine: "duckduckgo", // "duckduckgo", "bing", "brave", "custom"
+    customSearchUrl: "https://duckduckgo.com/?q={query}",
+    alwaysNativeDomains: "google.com\nyoutube.com\nyoutu.be\nmega.nz",
+    nativePresentationStyle: "fullscreen", // "fullscreen" veya "popover"
+    interceptLinks: true // Linkleri yakalama açık/kapalı
+};
 
-// Bu siteler HER ZAMAN native ekranda açılır (iframe denenmez)
-const ALWAYS_NATIVE_DOMAINS = ["google.com", "youtube.com", "youtu.be", "mega.nz"];
+// Arama URL'si oluşturur (Google gömülemediği için seçenekler arasında yer almaz)
+function getSearchUrl(query, settings) {
+    const encoded = encodeURIComponent(query);
+    const engine = (settings && settings.searchEngine) || "duckduckgo";
+    switch (engine) {
+        case "bing":
+            return "https://www.bing.com/search?q=" + encoded;
+        case "brave":
+            return "https://search.brave.com/search?q=" + encoded;
+        case "custom": {
+            const template = (settings && settings.customSearchUrl) || "https://duckduckgo.com/?q={query}";
+            if (template.includes("{query}")) {
+                return template.replace("{query}", encoded);
+            }
+            return template + encoded;
+        }
+        case "duckduckgo":
+        default:
+            return "https://duckduckgo.com/?q=" + encoded;
+    }
+}
 
-// Adres cubuguna adres yerine kelime yazilirsa bu arama motoru kullanilir
-const SEARCH_URL = "https://duckduckgo.com/?q=";
-
-// Yazilan metni tam bir url'ye cevirir: adres ise https:// ekler, degilse arama yapar
-function normalizeInput(text) {
+// Yazılan metni tam bir URL'ye çevirir: adres ise https:// ekler, değilse seçili arama motorunu kullanır
+function normalizeInput(text, settings) {
     const t = (text || "").trim();
     if (!t) return null;
     if (/^https?:\/\//i.test(t)) return t;
     if (!/\s/.test(t) && /^[^\s]+\.[a-z]{2,}(\/.*)?$/i.test(t)) return "https://" + t;
-    return SEARCH_URL + encodeURIComponent(t);
+    return getSearchUrl(t, settings);
 }
 
-function hostMatches(hostname, domains) {
-    return domains.some((d) => hostname === d || hostname.endsWith("." + d));
+// Alan adının listedeki herhangi bir alan adıyla eşleşip eşleşmediğini kontrol eder
+function hostMatches(hostname, domainsList) {
+    if (!hostname || !Array.isArray(domainsList)) return false;
+    return domainsList.some((d) => hostname === d || hostname.endsWith("." + d));
+}
+
+// Alan adının kullanıcının girdiği "her zaman native açılacaklar" listesinde olup olmadığını kontrol eder
+function isAlwaysNativeHost(hostname, settings) {
+    if (!hostname) return false;
+    const raw = (settings && settings.alwaysNativeDomains) || "";
+    const list = raw
+        .split("\n")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.length > 0);
+    return hostMatches(hostname.toLowerCase(), list);
 }
 
 function isNativePlatform() {
@@ -227,33 +262,151 @@ class BrowserView extends ItemView {
     }
 }
 
+// Ayarlar Sekmesi (Obsidian Ayarlar menüsü altında görünür)
+class MobileLinkOpenerSettingTab extends PluginSettingTab {
+    constructor(app, plugin) {
+        super(app, plugin);
+        this.plugin = plugin;
+    }
+
+    display() {
+        const { containerEl } = this;
+        containerEl.empty();
+
+        containerEl.createEl("h2", { text: "Mobile Link Opener Ayarları" });
+
+        // 1) Link yakalama açma/kapama düğmesi
+        new Setting(containerEl)
+            .setName("Linkleri bu eklenti yakalasın")
+            .setDesc("Açık olduğunda notlardaki harici web bağlantılarına tıklandığında bu eklenti devreye girer.")
+            .addToggle((toggle) => {
+                toggle
+                    .setValue(this.plugin.settings.interceptLinks)
+                    .onChange(async (value) => {
+                        this.plugin.settings.interceptLinks = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
+
+        // 2) Arama motoru seçimi
+        new Setting(containerEl)
+            .setName("Arama motoru")
+            .setDesc("Adres çubuğuna adres yerine arama terimi girildiğinde kullanılacak motor (Google gömülemediği için listede yer almaz).")
+            .addDropdown((dropdown) => {
+                dropdown
+                    .addOption("duckduckgo", "DuckDuckGo (Varsayılan)")
+                    .addOption("bing", "Bing")
+                    .addOption("brave", "Brave Search")
+                    .addOption("custom", "Özel Arama Şablonu")
+                    .setValue(this.plugin.settings.searchEngine)
+                    .onChange(async (value) => {
+                        this.plugin.settings.searchEngine = value;
+                        await this.plugin.saveSettings();
+                        this.display(); // Özel arama kutusunu göstermek/gizlemek için sekme görünümünü tazele
+                    });
+            });
+
+        // 2b) Özel arama motoru URL şablonu (Sadece 'custom' seçildiğinde görünür)
+        if (this.plugin.settings.searchEngine === "custom") {
+            new Setting(containerEl)
+                .setName("Özel arama motoru URL şablonu")
+                .setDesc("Arama sorgusunun ekleneceği yere {query} yazın (Ör: https://duckduckgo.com/?q={query})")
+                .addText((text) => {
+                    text
+                        .setPlaceholder("https://duckduckgo.com/?q={query}")
+                        .setValue(this.plugin.settings.customSearchUrl || "")
+                        .onChange(async (value) => {
+                            this.plugin.settings.customSearchUrl = value.trim();
+                            await this.plugin.saveSettings();
+                        });
+                });
+        }
+
+        // 3) Her zaman native açılacak siteler listesi
+        new Setting(containerEl)
+            .setName("Her zaman native açılacak siteler")
+            .setDesc("Bu siteler iframe yerine doğrudan iOS native tarayıcısında açılır. Her satıra bir alan adı yazın (Ör: google.com).")
+            .addTextArea((textarea) => {
+                textarea
+                    .setPlaceholder("google.com\nyoutube.com\nyoutu.be\nmega.nz")
+                    .setValue(this.plugin.settings.alwaysNativeDomains)
+                    .onChange(async (value) => {
+                        this.plugin.settings.alwaysNativeDomains = value;
+                        await this.plugin.saveSettings();
+                    });
+                textarea.inputEl.rows = 5;
+                textarea.inputEl.cols = 28;
+            });
+
+        // 4) Native ekran stili (fullscreen veya popover)
+        new Setting(containerEl)
+            .setName("Native ekran stili")
+            .setDesc("Capacitor Browser ile native açıldığında ekranın sunum biçimi.")
+            .addDropdown((dropdown) => {
+                dropdown
+                    .addOption("fullscreen", "Tam Ekran (Fullscreen)")
+                    .addOption("popover", "Açılır Pencere (Popover)")
+                    .setValue(this.plugin.settings.nativePresentationStyle)
+                    .onChange(async (value) => {
+                        this.plugin.settings.nativePresentationStyle = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
+    }
+}
+
 module.exports = class MobileLinkOpener extends Plugin {
     async onload() {
+        // Ayarları yükle
+        await this.loadSettings();
+        this.addSettingTab(new MobileLinkOpenerSettingTab(this.app, this));
+
         this.registerView(VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
 
-        // Linke tiklamayi yakala (capture = true: Obsidian'dan once biz gorelim)
+        // Linke tıklamayı yakala (capture = true: Obsidian'dan önce biz görelim)
         this.registerDomEvent(document, "click", (e) => this.handleLinkClick(e), true);
 
         this.addCommand({
             id: "new-web-tab",
-            name: "Yeni web sekmesi ac",
+            name: "Yeni web sekmesi aç",
             callback: () => this.openInTab("")
         });
 
         this.addCommand({
             id: "test-native-browser",
-            name: "Test: native tarayici (Google)",
+            name: "Test: native tarayıcı (Google)",
             callback: () => this.openNative("https://www.google.com")
         });
 
         this.addCommand({
             id: "test-tab-browser",
-            name: "Test: Obsidian sekmesinde ac (example.com)",
+            name: "Test: Obsidian sekmesinde aç (example.com)",
             callback: () => this.openInTab("https://example.com")
         });
     }
 
+    async loadSettings() {
+        try {
+            this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        } catch (e) {
+            console.error("[Mobile Link Opener] Ayarlar yüklenirken hata:", e);
+            this.settings = Object.assign({}, DEFAULT_SETTINGS);
+        }
+    }
+
+    async saveSettings() {
+        try {
+            await this.saveData(this.settings);
+        } catch (e) {
+            console.error("[Mobile Link Opener] Ayarlar kaydedilirken hata:", e);
+            new Notice("Ayarlar kaydedilirken bir hata oluştu.");
+        }
+    }
+
     async handleLinkClick(event) {
+        // Eğer kullanıcı ayarlarından link yakalama kapatılmışsa dokunma
+        if (!this.settings?.interceptLinks) return;
+
         const anchor = event.composedPath?.().find((el) => el?.tagName === "A");
         if (!anchor) return;
 
@@ -269,10 +422,10 @@ module.exports = class MobileLinkOpener extends Plugin {
 
         if (url.protocol !== "http:" && url.protocol !== "https:") return;
 
-        // Sadece not icindeki (okuma / duzenleme gorunumu) linklerle ilgilen
+        // Sadece not içindeki (okuma / düzenleme görünümü) linklerle ilgilen
         if (!anchor.closest(".markdown-preview-view, .markdown-source-view")) return;
 
-        // Bunlar async islemden ONCE cagrilmali
+        // Bunlar async işlemden ÖNCE çağrılmalı
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
@@ -289,8 +442,8 @@ module.exports = class MobileLinkOpener extends Plugin {
         try {
             const hostname = new URL(url).hostname.toLowerCase();
 
-            // 1) Bilinen sorunlu siteler: direkt native (sadece telefonda/iPad'de)
-            if (isNativePlatform() && hostMatches(hostname, ALWAYS_NATIVE_DOMAINS)) {
+            // 1) Bilinen / kullanıcı tarafından belirlenen siteler: direkt native (sadece telefonda/iPad'de)
+            if (isNativePlatform() && isAlwaysNativeHost(hostname, this.settings)) {
                 return await this.openNative(url);
             }
 
@@ -315,14 +468,14 @@ module.exports = class MobileLinkOpener extends Plugin {
         }
     }
 
-    // Mevcut sekmede adres cubugundan gezinme
+    // Mevcut sekmede adres çubuğundan gezinme
     async navigate(view, text) {
         try {
-            const url = normalizeInput(text);
+            const url = normalizeInput(text, this.settings);
             if (!url) return;
 
             const hostname = new URL(url).hostname.toLowerCase();
-            const forceNative = isNativePlatform() && hostMatches(hostname, ALWAYS_NATIVE_DOMAINS);
+            const forceNative = isNativePlatform() && isAlwaysNativeHost(hostname, this.settings);
 
             let embeddable = false;
             if (!forceNative) {
@@ -369,7 +522,8 @@ module.exports = class MobileLinkOpener extends Plugin {
 
         if (browser && isNativePlatform()) {
             try {
-                await browser.open({ url, presentationStyle: NATIVE_PRESENTATION_STYLE });
+                const presentationStyle = this.settings?.nativePresentationStyle || "fullscreen";
+                await browser.open({ url, presentationStyle });
                 return;
             } catch (e) {
                 console.error("[Mobile Link Opener] Native açılamadı:", e);
